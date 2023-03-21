@@ -1,0 +1,610 @@
+---
+title: "Prueba técnica: presentación de resultados"
+author: 
+  - Jorge Humberto Moncayo Bravo *(jmoncayo@unal.edu.co)*
+date:
+  "18 de marzo de 2023"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+    number_sections: true
+    fig_caption: yes
+    extra_dependencies: ["float"]
+header-includes:
+  - \usepackage{comment}
+  - \usepackage{graphicx}
+  - \usepackage{booktabs}
+  - \usepackage{xcolor}
+  - \usepackage{longtable}
+  - \usepackage{multirow}
+  - \usepackage{wrapfig}
+  - \usepackage{float}
+  - \usepackage{colortbl}
+  - \usepackage{pdflscape}
+  - \usepackage{tabu}
+  - \usepackage{threeparttable}
+  - \usepackage{threeparttablex}
+  - \usepackage[normalem]{ulem}
+  - \usepackage{makecell}
+  - \usepackage{xcolor}
+  - \usepackage[spanish,es-tabla]{babel}
+  - \usepackage{titling}
+  - \setlength{\abovecaptionskip}{-13pt}
+  - \floatplacement{figure}{H}
+  - \usepackage{fancyhdr}
+  - \addtolength{\headheight}{0.5cm} 
+  - \pagestyle{fancyplain}
+  - \addtolength{\headheight}{0.5cm}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introducción
+
+En el presente informe se ponen de manifiesto los resultados de cada uno de los puntos asignados en la prueba técnica. Para los puntos **1** y **2** se presenta tanto la metodología como el componente de resultados (desde el punto de vista técnico y de negocio); así mismo, para el punto **3**, la explicación se realiza sin andamiajes a través de un breve párrafo con sus respectivas referencias bibliográficas. El análisis técnico se llevó a cabo en `RStudio` en su versión `2022.12.0`, empleando `R` en su versión `4.1.2` sobre una máquina `GNU-Linux` con distribución `Ubuntu 22.04.2`.
+
+# Metodología: primer punto
+
+En base al requerimiento del cliente interno, el propósito es crear un modelo de predictivo de clasificación que permita seleccionar los clientes de acuerdo con su probabilidad de incumplimiento, por tal razón, se decide realizar un análisis supervisado empleando clasificación binaria sobre el atributo `Mora30` porque de la proposición inicial se tiene que el producto se espera ofrecer a "un segmento de la población de riesgo bajo", de ahí que este atributo resulte un clasificador más sensato, en comparación con `Mora60`, para determinar los clientes que pueden caer en mora en el **corto plazo**. Elegido el enfoque de resolución del problema de negocio, el flujo de trabajo para dar respuesta a este punto tiene los siguientes pasos esenciales basados en el flujo de trabajo sugerido por el *framework* `tidymodels`, el cual es una colección de parquetes para modelado y machine learning enfocado en seguir los principios del `tidyverse` (reutilización, composición de funciones simples a través de *pipelines*, programación funcional y diseño para humanos):
+
+* Extracción y limpieza de datos
+* Creación de particiones de entrenamiento, prueba y validación
+* Definición de modelos
+* Definición de receta de preprocesamiento
+* Definición de flujo de trabajo y búsqueda de hiperparámetros
+* Evaluación de métricas y entrenamiento de modelo
+
+La descripción detallada de los pasos anteriormente descritos se describe en la siguiente sección.
+
+# Resultados: primer punto
+
+## Extracción y limpieza de datos
+
+En este paso, se extrae la información proveniente de un archivo en formato .xlsx para almacenarlo en un objeto de clase `tibble` (una versión moderna de la clase `data.frame` que se encuentra en la base de R).
+
+```{r, echo = F}
+ruta <- "~/Documentos/Pruebas/pruebaTuya/literal_1/input/ProductoNuevo.xlsx"
+```
+
+```{r, warning=FALSE, message=FALSE}
+library(ggplot2)
+library(tidymodels)
+library(tidyverse)
+library(readxl)
+library(tibble)
+library(parsnip)
+library(vip)
+
+df <- read_excel(ruta, 
+                 col_types = c("skip", "skip", "numeric", 
+                               "numeric", "numeric", "numeric", 
+                               "numeric", "numeric", "numeric", 
+                               "numeric", "text", "text", "numeric", 
+                               "text", "text", "numeric", "text", 
+                               "text", "numeric", "numeric", "numeric", 
+                               "numeric")) %>% 
+  as_tibble()
+
+df
+```
+
+A continuación, se modifican los nombres de las columnas para hacerlos más accesibles:
+
+```{r}
+colnames(df) <- c("mora30", "mora60", "moramax_ultimosemestre", 
+                  "experiencia", "personas_cargo", "gastos_familiares",
+                  "gastos_arriendo", "tiempo_actividad", "ocupacion",
+                  "tipo_contrato", "edad", "estado_civil",
+                  "genero", "ingresos", "nivel_academico", 
+                  "tipo_vivienda", "tiempo_cliente","tiempo_sistema", 
+                  "porcend", "obligaciones_sistema")
+```
+
+Se modifican los tipos de datos de algunas columnas y se efectúa un breve análisis descriptivo de los datos:
+
+```{r}
+df <- df %>% 
+  mutate(mora30 = as.factor(mora30),
+         mora60 = as.factor(mora60),
+         moramax_ultimosemestre = as.integer(moramax_ultimosemestre),
+         experiencia = as.integer(experiencia),
+         personas_cargo = as.integer(personas_cargo),
+         gastos_familiares = as.integer(gastos_familiares),
+         gastos_arriendo = as.integer(gastos_arriendo),
+         edad = as.integer(edad),
+         ingresos = as.integer(ingresos),
+         tiempo_cliente = as.integer(tiempo_cliente),
+         tiempo_sistema = as.integer(tiempo_sistema),
+         obligaciones_sistema = as.integer(obligaciones_sistema))
+summary(df)
+```
+
+De lo anterior, se tiene que para `tiempo_actividad` se cuenta con un valor atípico (866880), el cuál se imputa por la mediana para evitar afectación en el desempeño de los modelos que se desarrollan más adelante.
+
+```{r}
+mediana <- median(df$tiempo_actividad, na.rm = TRUE)
+outlier <- 866880.0
+df$tiempo_actividad[df$tiempo_actividad == outlier] <- mediana
+```
+
+Del enfoque de resolución del problema se estableció que `mora30` es el clasificador o variable de respuesta, de ahí que se proceda a efectuar la eliminación de `mora60` y `moramax_ultimosemestre`.
+
+```{r}
+df <- df %>% 
+  select(-mora60, -moramax_ultimosemestre)
+```
+
+## Creación de particiones de datos
+
+Una vez obtenido el conjunto de datos a tratar, limpiado y transformado, es menester crear conjuntos de entrenamiento, prueba y validación que son insumo en las etapas de modelamiento y validación. Para esto, se aprovechan las funciones de `tidymodels` destinadas a este propósito y se crean los conjuntos de datos estratificados (para balancear la proporción de muestras pertenecientes a individuos que entran o no en mora).
+
+```{r}
+#Definición de semilla
+set.seed(1) #Definición de semilla
+# Parámetro strata en mora30 para estrafificación
+splits <- initial_split(df, strata = mora30)
+df_training <- training(splits)
+df_testing <- testing(splits)
+set.seed(2)
+df_validation <- validation_split(df_training, 
+                            strata = mora30, 
+                            prop = 0.80)
+
+```
+
+## Definición de modelos
+
+El paso siguiente es definir los modelos candidatos que más adelante se comparan en función de su desempeño y métricas. Para este, fin se opta por escoger dos modelos clásicos y uno derivado del aprendizaje profundo: regresión logística con penalización, bosque aletario y una red neuronal (perceptrón multicapa). La construcción de estos modelos a través de `tidymodels` es sencilla: se define el modelo y sus hiperparámetros, se escoge el `engine` o librería que va a realizar el modelado, así como su respectiva configuración y, por último, se define el tipo de modelo, que en este caso es `classification`. Adicionalmente se define una variable llamada `cores` que se invoca dentro de la función `set_engine` y que la utiliza el parámetro `num.threads` y sirve para entrenar modelos aprovechando la capacidad multinúcleo del procesador. Nótese que los hiperparámetros no se definen explícitamente, sino a través del objeto `tune()`, dado que sobre cada modelo candidato se pretende efectuar un *grid search* para encontrar los hiperparámetros óptimos en cada uno de estos.  
+
+```{r}
+# Para detectar el número de hilos del procesador
+cores <- parallel::detectCores()
+
+model_lr <- logistic_reg(penalty = tune(), mixture = 1) %>% 
+  set_engine("glmnet", num.threads = cores)
+
+model_rf <- rand_forest(trees = tune(), mtry = tune(), min_n = tune()) %>% 
+  set_engine("ranger", num.threads = cores) %>% 
+  set_mode("classification")
+
+model_neural <- mlp(hidden_units = tune(), 
+                    activation = tune(), 
+                    dropout = tune(),
+                    epochs = 30) %>% # 30 épocas
+  set_engine("keras", num.threads = cores) %>%
+  set_mode("classification")
+```
+
+## Definición de receta de preprocesamiento
+
+Del conjunto de datos de entrenamiento, se tienen variables categóricas (o factores) y variables numéricas. La estructura en que se encuentra este *set* de datos no es la adecuada para efectuar el modelado, por tal motivo las variables numéricas deben ser sometidas a un proceso de normalización y escalado y las variables categóricas ser  puestas a punto a través de un proceso de *one hot encoding*,  esto con el fin de acelerar el aprendizaje de los algoritmos y mejorar la precisión e interpretabilidad de los modelos. Para tal fin, se define sobre un *pipeline* de `tidymodels` la receta `recipe()` de preprocesamiento de datos.
+
+```{r}
+df_rec <- recipe(mora30 ~ ., data = df_training) %>% 
+  # Se aplica codificación one hot sobre variables categóricas
+  step_dummy(all_nominal_predictors()) %>% 
+  # Eliminar variables redundantes que están altamente correlacionadas
+  step_corr(all_numeric_predictors(), threshold = 0.9) %>%
+  # Normalización de las variables numéricas
+  step_normalize(all_numeric_predictors()) %>% 
+  # Escalamiento de las variables numéricas
+  step_scale(all_numeric_predictors())
+```
+
+## Flujo de trabajo y búsqueda de hiperparámetros
+
+A continuación, se definen los flujos de trabajo *worflows* empleando el objeto `workflow()` de `tidymodels` a través de un *pipeline* donde se iniciliza el mismo y se añaden los modelos y las recetas. 
+
+```{r}
+# Flujo de trabajo: regresión logística
+lr_workflow <- 
+  workflow() %>% 
+  add_model(model_lr) %>% 
+  add_recipe(df_rec)
+
+# Flujo de trabajo: bosque aleatorio
+rf_workflow <- 
+  workflow() %>% 
+  add_model(model_rf) %>% 
+  add_recipe(df_rec)
+
+# Flujo de trabajo: red neuronal
+neural_workflow <- 
+  workflow() %>% 
+  add_model(model_neural) %>% 
+  add_recipe(df_rec)
+```
+
+### Definición de cuadrículas de hiperparámetros
+
+Como la intención es que sobre cada modelo se efectúe un *grid search* aprovechando el `tune_grid()` de `tidymodels` entonces se definen las cuadrículas de búsqueda, se almacenan y se pasan sobre los *pipelines* definidos para los flujos de trabajo y se efectuan así los procesos de búsqueda de hiperparámetros óptimos.
+
+```{r}
+# Definición de cuadrícula para 
+# los hiperparámetros del bosque aleatorio
+# Se evalúan trees, min_n y mtry
+n_combinations <- 50 # Número de combinaciones
+trees_bounds_rf <- c(10, 100) # trees varía de 10 a 100
+min_n_bounds_rf <- c(1, 50) # min_ varía de 1 a 50
+mtry_bounds_rf <- c(1, 10) # mtry varía de 1 a 10
+trees_values_rf <- sample.int(trees_bounds_rf[2] - trees_bounds_rf[1], 
+                              n_combinations, replace = TRUE) + trees_bounds_rf[1]
+min_n_values_rf <- sample.int(min_n_bounds_rf[2] - min_n_bounds_rf[1], 
+                           n_combinations, replace = TRUE) + min_n_bounds_rf[1]
+mtry_values_rf <- runif(n_combinations, mtry_bounds_rf[1], mtry_bounds_rf[2])
+
+# Cuadrícula de rf
+grid_rf <- tibble(
+  trees = trees_values_rf,
+  min_n = min_n_values_rf,
+  mtry = mtry_values_rf
+)
+
+# Definición de cuadrícula para 
+# el hiperparámetro de penalización en
+# regresión logística
+grid_lr <- tibble(penalty = 10^seq(-4, -1, length.out = 30))
+
+# Definición de cuadrícula para
+# hiperparámetros en perceptrón multicapa
+# Capas ocultas, función de activación y dilución
+grid_neural <- crossing(
+  hidden_units = c(4, 8, 16, 32, 64),
+  activation = c("relu"),
+  dropout = c(0.01, 0.03, 0.05, 0.07, 0.1, 0.3, 0.5, 0.7, 0.9, 0.99),
+)
+```
+
+### *Grid search* sobre hiperparámetros
+
+```{r, eval = T, warning=FALSE, message=F}
+# Obtención de resultados a través de
+# métricas de roc_auc, precisión y sensibilidad
+# Grid search sobre conjunto de validación
+
+# Grid search sobre regresión logística
+lr_res <- 
+  lr_workflow %>% 
+  tune_grid(df_validation,
+            grid = grid_lr,
+            control = control_grid(save_pred = TRUE),
+            metrics = metric_set(roc_auc, precision, sensitivity))
+
+# Grid search sobre bosque aleato
+rf_res <- 
+  rf_workflow %>% 
+  tune_grid(df_validation,
+            grid = grid_rf,
+            control = control_grid(save_pred = TRUE),
+            metrics = metric_set(roc_auc, precision, sensitivity))
+
+# Grid search sobre perceptrón multicapa
+neural_res <- 
+  neural_workflow %>% 
+  tune_grid(df_validation,
+            grid = grid_neural,
+            control = control_grid(save_pred = TRUE),
+            metrics = metric_set(roc_auc, precision, sensitivity))
+```
+
+Posteriormente, se almacenan los resultados de cada uno de los *grid search*:
+
+```{r, eval = T, warning=F, message=F}
+rf_best <- 
+  rf_res %>% 
+  collect_metrics() %>% 
+  spread(.metric, mean) %>% 
+  arrange(desc(roc_auc))
+rf_top <- 
+  rf_res %>% 
+  select_best(metric = "roc_auc")
+rf_auc <- 
+  rf_res %>% 
+  collect_predictions(parameters = rf_top) %>% 
+  roc_curve(mora30, .pred_0) %>% 
+  mutate(model = "Random Forest")
+
+lr_best <- 
+  lr_res %>% 
+  collect_metrics() %>% 
+  spread(.metric, mean) %>% 
+  arrange(desc(roc_auc))
+lr_top <- 
+  lr_res %>% 
+  select_best(metric = "roc_auc")
+lr_auc <- 
+  lr_res %>% 
+  collect_predictions(parameters = lr_top) %>% 
+  roc_curve(mora30, .pred_0) %>% 
+  mutate(model = "Logistic Regression")
+
+neural_best <- 
+  neural_res %>% 
+  collect_metrics() %>% 
+  spread(.metric, mean) %>% 
+  arrange(desc(roc_auc))
+neural_top <- 
+  neural_res %>% 
+  select_best(metric = "roc_auc")
+neural_auc <- 
+  neural_res %>% 
+  collect_predictions(parameters = neural_top) %>% 
+  roc_curve(mora30, .pred_0) %>% 
+  mutate(model = "Neural Network")
+neural_best_auc <-neural_best$roc_auc[1]
+```
+
+
+### Evaluación de métricas y entrenamiento de modelo
+
+A continuación, en base a los resultados de los *grid search*, se tiene que:
+
+* El `roc_auc` para la regresión logística es de: `r round(lr_best$roc_auc[1], 3)`
+* El `roc_auc` para el bosque aletorio es de: `r round(rf_best$roc_auc[1], 3)`
+* El `roc_auc` para la red neuronal es de: `r round(neural_best$roc_auc[1], 3)`
+
+Así mismo, se presenta la gráfica de las curvas ROC para cada uno de los modelos candidatos:
+
+```{r, eval = T, fig.width=10, fig.height=10}
+bind_rows(rf_auc, lr_auc, neural_auc) %>% 
+  ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(linewidth = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6) +
+  labs(title = "Curvas ROC de diferentes modelos",
+       x = "1 - Especificidad", y = "Sensibilidad", col = "Modelos") +
+  scale_x_continuous(limits = c(0, 1), expand = c(0, 0)) +
+  scale_y_continuous(limits = c(0, 1), expand = c(0, 0)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+        legend.position = "top", # Ubica la leyenda debajo de la gráfica
+        legend.justification = "center", # Centra la leyenda
+        legend.title = element_text(size = 14),
+        axis.title = element_text(size = 14, face = "bold"),
+        axis.text = element_text(size = 12))
+```
+
+En base a lo anterior, el mejor modelo, de entre los evaluados, es el **bosque aleatorio** con `roc_auc` de `r round(rf_best$roc_auc[1], 3)`, precisión de `r round(rf_best$precision[1], 3)` y sensibilidad de `r round(rf_best$sensitivity[1], 3)`. De todas formas, es de aclarar, que el rendimiento de los modelos candidatos es bastante moderado, ligeramente superior al azar. 
+
+### Prueba de modelo escogido con hiperparámetros óptimos
+
+```{r, warning=F, message=F}
+# Se establece modelo de validación
+last_rf_mod <- 
+  rand_forest(mtry = rf_best$mtry[1], 
+              min_n = rf_best$min_n[1], 
+              trees = rf_best$trees[1]) %>% 
+  set_engine("ranger", num.threads = cores, 
+             importance = "impurity") %>% 
+  set_mode("classification")
+
+# Se establece worflow
+last_rf_workflow <- 
+  rf_workflow %>% 
+  update_model(last_rf_mod)
+
+# Se establece ajuste
+set.seed(123)
+last_rf_fit <- 
+  last_rf_workflow %>% 
+  last_fit(splits)
+```
+
+Se visualizan los resultados de la predicción sobre datos no vistos:
+
+```{r}
+last_rf_metrics <- last_rf_fit %>% 
+  collect_metrics()
+```
+
+De lo anterior, se tiene que la métrica de `roc_auc` sobre datos no vistos es de `r last_rf_metrics[2,3]`. El cual, como es de esperar, es inferior al obtenido en el entrenamiento. Así mismo, la precisión es de `r round(last_rf_metrics[1,3], 3)` o, lo que es lo mismo, el modelo acertó un 75.3% de las veces.
+
+Por curiosidad, se examinan las 20 variables que más influyen en la predicción:
+
+```{r, fig.width=10, fig.height=10}
+last_rf_fit %>% 
+  extract_fit_parsnip() %>% 
+  vip(num_features = 20)
+```
+
+
+# Metodología: segundo punto
+
+Teniendo en cuenta los requerimientos de este punto, la intención es elegir de entre dos modelos de clasificación de clientes en base a su puntaje e incumplimiento. Los criterios de elección se presentan en el enunciado: capacidad discriminante, estabilidad y distribución de buenos y malos. Con esto en mente, el enfoque es, una vez extraído el conjunto de datos, partirlo en dos *sets*: cliente AB y cliente XY. Posteriormente, dado que tenemos solo dos variables de importancia en cada *set* (puntuación e incumplimiento), se halla la correlación entre estas dos variables para tener un primer acercamiento respecto a la relación de cada variable de puntuación con el incumplimiento predicho. Más adelante, se efectúa un proceso de entrenamiento de un modelo de regresión logística sin penalización sobre cada *set* de datos a través de validación cruzada (*cross validation*) para determinar la capacidad discriminante y estabilidad de cada modelo y así tener herramientas suficientes para comparar los modelos en cuestión.
+
+# Resultados: segundo punto
+
+```{r, echo = F}
+ruta <- "~/Documentos/Pruebas/pruebaTuya/literal_2/input/ModelosCompetencia.xlsx"
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+# Se cargan las librerías necesarias
+library(ltm)
+library(naniar)
+
+# Se importa el archivo en formato .xlsx a un data frame en formato tibble
+df <- read_excel(ruta, col_types = c("skip", "skip", "numeric", 
+                                                     "text", "numeric")) %>% 
+  as_tibble()
+
+colnames(df) <- c("puntaje_AB", "puntaje_XY", "default")
+df$puntaje_XY[df$puntaje_XY == "."] <- NA 
+df$puntaje_XY <- as.integer(df$puntaje_XY)
+df$puntaje_AB <- as.integer(df$puntaje_AB)
+df$default <- as.factor(df$default)
+summary(df)
+```
+
+El porcentaje de datos nulos en la columna `puntaje_XY` es de `r round(sum(is.na(df$puntaje_XY))/nrow(df)*100, 2)`%. Por tal motivo, se evalúa si la procedencia de los datos nulos se debe a factores aleatorios o no, de ahí que un enfoque que se aplica en el presente análisis es la realización de una prueba MCAR (*Missing Completely at Random*) en donde la hipótesis nula es que los datos faltantes son un MCAR, es decir, que no hay un patrón específico en los datos faltantes. Valores p < 0.05 indican, por el contrario que los datos faltantes no son un MCAR.
+
+```{r}
+mcar_test(df[c("puntaje_XY", "default")])
+```
+
+De la prueba anterior se desprende que, con un valor p >> 0.05, los datos faltantes son un MCAR. Así pues, se procede con la eliminación de dichos valores faltantes y con la división en los dos *sets* de datos.
+
+```{r}
+# Eliminación de valores faltantes
+df <- na.omit(df)
+# Partición de los sets de datos
+df_AB <- df[c("puntaje_AB", "default")]
+df_XY <- df[c("puntaje_XY", "default")]
+```
+
+A continuación, se hallan las correlaciones para cada *set* de datos entre la puntuación y el *default*. Para esto, dado que tenemos una variable continua y otra categórica binaria, empleamos la correlación biserial puntual, así pues, tenemos que para el *set* cliente AB, la correlación biserial puntual es de `r biserial.cor(df_AB$puntaje_AB, df_AB$default)` y la correlación para el *set* del cliente XY es de `r biserial.cor(df_XY$puntaje_XY, df_AB$default)`. Ambas correlaciones son muy bajas, para efectos prácticos 0, de ahí que en cada uno de los modelos planteados no se tenga correlación entre el puntaje y el *default*, por lo que se puede intuir, de primera mano, que desarrollando un modelo de predicción sobre cada *set* de datos, sus capacidades predictivas son equiparables a las del mero azar. Aún así, para dar seguimiento a la metodología planteada, se continúa con el ejercicio.
+
+## Particionado y modelado
+
+```{r, warning=F}
+# e define semilla
+set.seed(123)
+
+# Se particionan datos
+AB_split <- initial_split(df_AB, prop = 0.8)
+AB_train <- training(AB_split)
+AB_test <- testing(AB_split)
+XY_split <- initial_split(df_XY, prop = 0.8)
+XY_train <- training(XY_split)
+XY_test <- testing(XY_split)
+
+# Se define modelo regresión logística
+## Válido para ambos sets AB y XY
+lr_mod <- 
+  logistic_reg(mode = "classification") %>% 
+  set_engine("glm")
+
+# Se ajustan modelos
+lr_fit_AB <- 
+  lr_mod %>% 
+  fit(default ~ ., data = AB_train)
+
+lr_fit_XY <- 
+  lr_mod %>% 
+  fit(default ~ ., data = XY_train)
+
+lr_training_pred_AB <- 
+  predict(lr_fit_AB, AB_train) %>% 
+  bind_cols(predict(lr_fit_AB, AB_train, type = "prob")) %>% 
+  # Add the true outcome data back in
+  bind_cols(AB_train %>% 
+              dplyr::select(default))
+
+lr_training_pred_XY <- 
+  predict(lr_fit_XY, XY_train) %>% 
+  bind_cols(predict(lr_fit_XY, XY_train, type = "prob")) %>% 
+  # Add the true outcome data back in
+  bind_cols(XY_train %>% 
+              dplyr::select(default))
+
+```
+
+## Verificación métricas y *cross validation*
+
+Se presenta el resultado de la métrica `roc_auc`, sobre el conjunto de entrenamiento, para el *set* cliente AB:
+
+```{r}
+lr_training_pred_AB %>%
+  roc_auc(truth = default, .pred_0)
+```
+
+Así mismo, se presenta el resultado de la métrica `roc_auc`, sobre el conjunto de entrenamiento, para el *set* cliente XY:
+
+```{r}
+lr_training_pred_XY %>%
+  roc_auc(truth = default, .pred_0)
+```
+
+Con valores de `roc_auc` de aproximadamente 0.5 sobre cada conjunto de entrenamiento, se puede decir con certeza que ambos modelos de clasificación no tienen capacidad predictiva y se comportan similar a la elección aleatorio de la variable de predicción. Así pues, se continúa con el ejercicio, aunque las conclusiones derivadas del entrenamiento saltan a la vista.
+
+```{r}
+# Se establece semilla
+set.seed(789)
+# Se establecen los folds (5)
+folds <- vfold_cv(AB_train, v = 5)
+# Se genera el worflow
+lr_wf_AB <- 
+  workflow() %>%
+  add_model(lr_mod) %>%
+  add_formula(default ~ .)
+# Se establece nueva semilla
+# Se ajusta aplicando remuestreo
+set.seed(321)
+lr_fit_rs_AB <- 
+  lr_wf_AB %>% 
+  fit_resamples(folds)
+
+# Se establece semilla
+set.seed(123)
+folds <- vfold_cv(XY_train, v = 5)
+# Se genera el worflow
+lr_wf_XY <- 
+  workflow() %>%
+  add_model(lr_mod) %>%
+  add_formula(default ~ .)
+# Se establece nueva semilla
+# Se ajusta aplicando remuestreo
+set.seed(456)
+lr_fit_rs_XY <- 
+  lr_wf_XY %>% 
+  fit_resamples(folds)
+```
+
+Se aplica `collect_metrics` sobre los modelos sometidos a validación cruzada y se inspeccionan sus métricas:
+
+Para el *set* AB:
+
+```{r}
+collect_metrics(lr_fit_rs_AB)
+```
+
+Y, para el *set* XY:
+
+```{r}
+collect_metrics(lr_fit_rs_XY)
+```
+
+De lo anterior, se desprende que incluso siguiendo el enfoque de validación cruzada las métricas, en general, no difieren y los modelos planteados por los clientes no tienen capacidad predictiva significativamente mejor que el azar y, por tanto, no se puede elegir entre ninguno de los dos modelos.
+
+
+# Solución tercer punto
+
+Las principales variables macroeconómicas que, considero, se deben estar monitoreando y, de ser posible, ensamblar en modelos de toma de decisiones son: 
+
+* Crecimiento del PIB: es quizá la variable macroeconómica de referencia, puesto que indica la tasa de crecimiento (o decrecimiento) en la suma de bienes y servicios producidos en el país. En valor positivo y elevado en esta variable significa, de forma muy general, que los individuos están percibiendo mayores ingresos en su trabajo, lo que les permite aumentar su ritmo de consumo y ahorro. 
+* Índice de precios del consumidor (IPC) e inflación: el IPC es un indicador que hace referencia a la variación en el promedio de precios para un grupo de bienes y servicios y representa, en términos prácticos, el costo de vida. El crecimiento del IPC es lo que se conoce como inflación, y es de suma importancia porque la variación en este indicador afecta la capacidad de compra de los individuos, la redistribución de los ingresos y la competitividad de las empresas.  
+* Informe sobre Mercado Laboral del DANE y Gran Encuesta Integrada de Hogares: con esta información se puede tener un panorama sobre la tasa de desempleo a nivel nacional, regional, departamental y a nivel de capitales.
+* Productividad Total de los Factores: es una variable económica vital para medir el crecimiento y desarrollo de la economía. Se calcula relacionando el PIB con los factores que lo generan a nivel de capital y trabajo. Es útil monitorear su valor porque da una mejor idea sobre la competitividad, el crecimiento económico sostenible a largo plazo y el bienestar social general en la población.
+* Reportes de Inclusión Financiera: estos reportes son interesantes porque realizan diagnósticos sobre la evolución en el acceso y aceptación de servicios financieros. 
+* Tasa Representativa del Mercado (TRM): el aumento o disminución de la relación dólar/peso colombiano favorecen o desfavorecen a distintos sectores de la economía. 
+* Tipos de interés Fed: el aumento en los tipos de interés de lal Sistema de Reserva Federal suele ser un indicador global de enfriamiento de la economía con fines de reducción de la inflación en los Estados Unidos, lo que suele traducirse en disminución en la demanda de materias primas colombianas que son pagadas con divisas extranjeras, así mismo la subida de tipos puede presional el alza en el precio del dólar y en la política monetaria del Banco de la República. 
+* Tipos de interés BCC: la subida en los tipos de interés del Banco de la República suele traducirse en intentos por contener la inflación y "enfriar" la economía reduciendo la oferta de dinero, lo cual tiene un impacto directo porque encarece el acceso al crédito, puede aumentar el desempleo puesto que las empresas están menos dispuestas a contratar personal debido a que sus gastos operacionales se destinan a pago de deuda, aumenta la morosidad por cartera vencida y disminuye el margen de las empresas fuertemente apalancadas en el crédito.
+
+# Conclusiones
+
+En el caso de la solución del primer punto:
+
+* Se desarrolló un modelo de clasificación de clientes basado en su probabilidad de mora. El modelo escogido, de entre tres candidatos, fue un bosque aleatorio. Las métricas de este modelo a penas estuvieron del orden de 1.5 puntos porcentuales por encima de los otros dos modelos candidatos (regresión logística con penalización y una red neuronal)
+
+* Las métricas obtenidas en los modelos de clasificación resultaron bastante modestas a pesar de haber desarrollado un enfoque basado en optimización de hiperparámetros, por lo que es menester revisar la metodología y optar por enfoques alternativos que mejoren las métricas en la clasificación.
+
+En el caso de la solución del segundo punto:
+
+* Se determinó una metodología para el tratamiento de los datos faltantes derivados de la presencia del caracter . (punto) que fueron convertidos a valores nulos. Dicha metodología probó que la naturaleza de dichos valores ausentes se debe a la aleatoriedad.
+
+* Se pudo realizar una prueba de correlación entre el puntaje y el *default* para los *sets* de datos de los clientes y se determinó que la correlación es aproximadamente 0.
+
+* En base a la correlación de aproximadamente 0 se probó, en conjunto con el análisis predictivo, que un modelo de clasificación basado en el puntaje propuesto no puede tener un mejor rendimiento que uno debido al mero azar.
+
+* La solución al problema probablemente resultó tautológica, sin embargo, esto pudo deberse a la incomprensión del problema, por parte del autor de este análisis, por lo que se recomienda una mejor acotación del mismo para evitar ambiguedades en la solución del problema.
+
+# Información sobre sesión
+```{r}
+sessionInfo()
+```
+
+
